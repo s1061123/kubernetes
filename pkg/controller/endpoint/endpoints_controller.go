@@ -50,6 +50,8 @@ import (
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/kubernetes/pkg/features"
 	utilnet "k8s.io/utils/net"
+
+	nadc "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/utils"
 )
 
 const (
@@ -441,8 +443,55 @@ func (e *EndpointController) syncService(key string) error {
 				totalNotReadyEps = totalNotReadyEps + notReadyEps
 			}
 		}
+
+		//XXX: Add net-attach-def IP into subset
+		networkStatus, err := nadc.GetNetworkStatus(pod)
+		if len(networkStatus) != 0 {
+			fmt.Printf("XXX: Found!\n")
+			for _, v := range networkStatus {
+				if v.Name == "eth0" {
+					continue
+				}
+				for _, ip := range v.IPs {
+					fmt.Printf("\t XXX: add endpoint: %s, %s %v %v\n", v.Name, v.Interface, v.IPs, v.Default)
+					epa2 := v1.EndpointAddress{
+						IP:       ip,
+						NodeName: &pod.Spec.NodeName,
+						TargetRef: &v1.ObjectReference{
+							Kind:            "Pod",
+							Namespace:       pod.ObjectMeta.Namespace,
+							Name:            pod.ObjectMeta.Name,
+							UID:             pod.ObjectMeta.UID,
+							ResourceVersion: pod.ObjectMeta.ResourceVersion,
+						}}
+
+					for i := range service.Spec.Ports {
+						servicePort := &service.Spec.Ports[i]
+
+						portName := servicePort.Name
+						portProto := servicePort.Protocol
+						portNum, err := podutil.FindPort(pod, servicePort)
+						if err != nil {
+							klog.V(4).Infof("Failed to find port for service %s/%s: %v", service.Namespace, service.Name, err)
+							continue
+						}
+
+						var readyEps, notReadyEps int
+						epp2 := &v1.EndpointPort{Name: portName, Port: int32(portNum), Protocol: portProto}
+						subsets, readyEps, notReadyEps = addEndpointSubset(subsets, pod, epa2, epp2, tolerateUnreadyEndpoints)
+						totalReadyEps = totalReadyEps + readyEps
+						totalNotReadyEps = totalNotReadyEps + notReadyEps
+					}
+				}
+			}
+		} else {
+			fmt.Printf("XXX: Not Found!\n")
+		}
 	}
+	//XXX: need to modify!
+	fmt.Printf("XXX1: %v\n", subsets)
 	subsets = endpoints.RepackSubsets(subsets)
+	fmt.Printf("XXX2: %v\n", subsets)
 
 	// See if there's actually an update here.
 	currentEndpoints, err := e.endpointsLister.Endpoints(service.Namespace).Get(service.Name)
@@ -548,6 +597,13 @@ func (e *EndpointController) checkLeftoverEndpoints() {
 		e.queue.Add(key)
 	}
 }
+
+/*
+func addNetAttachDefEndpointSubset(subsets []v1.EndpointSubset, pod *v1.Pod, epa v1.EndpointAddress,
+	epp *v1.EndpointPort, tolerateUnreadyEndpoints bool) ([]v1.EndpointSubset, int, int) {
+	return subsets, readyEps, notReadyEps
+}
+*/
 
 func addEndpointSubset(subsets []v1.EndpointSubset, pod *v1.Pod, epa v1.EndpointAddress,
 	epp *v1.EndpointPort, tolerateUnreadyEndpoints bool) ([]v1.EndpointSubset, int, int) {

@@ -238,6 +238,8 @@ filegroup(
         "//vendor/github.com/jmespath/go-jmespath:all-srcs",
         "//vendor/github.com/jonboulle/clockwork:all-srcs",
         "//vendor/github.com/json-iterator/go:all-srcs",
+        "//vendor/github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io:all-srcs",
+        "//vendor/github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/utils:all-srcs",
         "//vendor/github.com/karrick/godirwalk:all-srcs",
         "//vendor/github.com/konsorten/go-windows-terminal-sequences:all-srcs",
         "//vendor/github.com/libopenstorage/openstorage/api:all-srcs",
