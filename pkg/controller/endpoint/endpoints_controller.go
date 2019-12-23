@@ -17,6 +17,7 @@ limitations under the License.
 package endpoint
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strconv"
@@ -436,33 +437,84 @@ func (e *EndpointController) syncService(key string) error {
 			epa.Hostname = hostname
 		}
 
-		// Allow headless service not to have ports.
-		if len(service.Spec.Ports) == 0 {
-			if service.Spec.ClusterIP == api.ClusterIPNone {
-				subsets, totalReadyEps, totalNotReadyEps = addEndpointSubset(subsets, pod, epa, nil, tolerateUnreadyEndpoints)
-				// No need to repack subsets for headless service without ports.
+		//XXX
+		proxyName, ok := service.ObjectMeta.Labels["service.kubernetes.io/service-proxy-name"]
+		//XXX: Add net-attach-def IP into subset
+		if ok && proxyName == "multus-proxy" {
+			networkStatus, _ := GetNetworkStatus(pod)
+			if len(networkStatus) != 0 {
+				fmt.Printf("XXX: Found!\n")
+				for _, v := range networkStatus {
+					if v.Interface == "eth0" {
+						continue
+					}
+					for _, ip := range v.IPs {
+						fmt.Printf("\t XXX: add endpoint: %s, %s %v %v\n", v.Name, v.Interface, v.IPs, v.Default)
+						epa2 := v1.EndpointAddress{
+							IP:       ip,
+							NodeName: &pod.Spec.NodeName,
+							TargetRef: &v1.ObjectReference{
+								Kind:            "Pod",
+								Namespace:       pod.ObjectMeta.Namespace,
+								Name:            pod.ObjectMeta.Name,
+								UID:             pod.ObjectMeta.UID,
+								ResourceVersion: pod.ObjectMeta.ResourceVersion,
+							}}
+
+						for i := range service.Spec.Ports {
+							servicePort := &service.Spec.Ports[i]
+
+							portName := servicePort.Name
+							portProto := servicePort.Protocol
+							portNum, err := podutil.FindPort(pod, servicePort)
+							if err != nil {
+								klog.V(4).Infof("Failed to find port for service %s/%s: %v", service.Namespace, service.Name, err)
+								continue
+							}
+
+							var readyEps, notReadyEps int
+							epp2 := &v1.EndpointPort{Name: portName, Port: int32(portNum), Protocol: portProto}
+							subsets, readyEps, notReadyEps = addEndpointSubset(subsets, pod, epa2, epp2, tolerateUnreadyEndpoints)
+							totalReadyEps = totalReadyEps + readyEps
+							totalNotReadyEps = totalNotReadyEps + notReadyEps
+						}
+					}
+				}
+			} else {
+				fmt.Printf("XXX: Not Found!\n")
 			}
 		} else {
-			for i := range service.Spec.Ports {
-				servicePort := &service.Spec.Ports[i]
-
-				portName := servicePort.Name
-				portProto := servicePort.Protocol
-				portNum, err := podutil.FindPort(pod, servicePort)
-				if err != nil {
-					klog.V(4).Infof("Failed to find port for service %s/%s: %v", service.Namespace, service.Name, err)
-					continue
+			// Allow headless service not to have ports.
+			if len(service.Spec.Ports) == 0 {
+				if service.Spec.ClusterIP == api.ClusterIPNone {
+					subsets, totalReadyEps, totalNotReadyEps = addEndpointSubset(subsets, pod, epa, nil, tolerateUnreadyEndpoints)
+					// No need to repack subsets for headless service without ports.
 				}
+			} else {
+				for i := range service.Spec.Ports {
+					servicePort := &service.Spec.Ports[i]
 
-				var readyEps, notReadyEps int
-				epp := &v1.EndpointPort{Name: portName, Port: int32(portNum), Protocol: portProto}
-				subsets, readyEps, notReadyEps = addEndpointSubset(subsets, pod, epa, epp, tolerateUnreadyEndpoints)
-				totalReadyEps = totalReadyEps + readyEps
-				totalNotReadyEps = totalNotReadyEps + notReadyEps
+					portName := servicePort.Name
+					portProto := servicePort.Protocol
+					portNum, err := podutil.FindPort(pod, servicePort)
+					if err != nil {
+						klog.V(4).Infof("Failed to find port for service %s/%s: %v", service.Namespace, service.Name, err)
+						continue
+					}
+
+					var readyEps, notReadyEps int
+					epp := &v1.EndpointPort{Name: portName, Port: int32(portNum), Protocol: portProto}
+					subsets, readyEps, notReadyEps = addEndpointSubset(subsets, pod, epa, epp, tolerateUnreadyEndpoints)
+					totalReadyEps = totalReadyEps + readyEps
+					totalNotReadyEps = totalNotReadyEps + notReadyEps
+				}
 			}
 		}
+
 	}
+	fmt.Printf("XXX1: %v\n", subsets)
 	subsets = endpoints.RepackSubsets(subsets)
+	fmt.Printf("XXX2: %v\n", subsets)
 
 	// See if there's actually an update here.
 	currentEndpoints, err := e.endpointsLister.Endpoints(service.Namespace).Get(service.Name)
@@ -603,4 +655,48 @@ func shouldPodBeInEndpoints(pod *v1.Pod) bool {
 	default:
 		return true
 	}
+}
+
+// NetworkStatus is for network status annotation for pod
+type NetworkStatus struct {
+	Name      string   `json:"name"`
+	Interface string   `json:"interface,omitempty"`
+	IPs       []string `json:"ips,omitempty"`
+	Mac       string   `json:"mac,omitempty"`
+	Default   bool     `json:"default,omitempty"`
+	DNS       DNS      `json:"dns,omitempty"`
+}
+
+type DNS struct {
+	Nameservers []string `json:"nameservers,omitempty"`
+	Domain      string   `json:"domain,omitempty"`
+	Search      []string `json:"search,omitempty"`
+	Options     []string `json:"options,omitempty"`
+}
+
+const (
+	// Pod annotation for network-attachment-definition
+	NetworkAttachmentAnnot = "k8s.v1.cni.cncf.io/networks"
+	// Pod annotation for network status
+	NetworkStatusAnnot = "k8s.v1.cni.cncf.io/networks-status"
+)
+
+// GetNetworkStatus returns pod's network status
+func GetNetworkStatus(pod *v1.Pod) ([]NetworkStatus, error) {
+	if pod == nil {
+		return nil, fmt.Errorf("cannot find pod")
+	}
+	if pod.Annotations == nil {
+		return nil, fmt.Errorf("cannot find pod annotation")
+	}
+
+	netStatusesJson, ok := pod.Annotations[NetworkStatusAnnot]
+	if !ok {
+		return nil, fmt.Errorf("cannot find network status")
+	}
+
+	var netStatuses []NetworkStatus
+	err := json.Unmarshal([]byte(netStatusesJson), &netStatuses)
+
+	return netStatuses, err
 }
